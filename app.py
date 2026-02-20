@@ -65,18 +65,33 @@ def migrate_schema():
 # GOOGLE SHEET LOADER
 # ============================================
 
-import urllib.parse
-
 def load_sheet():
 
-    encoded_sheet = urllib.parse.quote(SHEET_NAME)
-
-    url = f"https://docs.google.com/spreadsheets/d/{GOOGLE_SHEET_ID}/gviz/tq?tqx=out:csv&sheet={encoded_sheet}"
+    url = f"https://docs.google.com/spreadsheets/d/{GOOGLE_SHEET_ID}/gviz/tq?tqx=out:csv&sheet={SHEET_NAME}"
 
     df = pd.read_csv(url)
 
+    # normalize column names
     df.columns = df.columns.str.strip()
 
+    required = [
+        "Product Name",
+        "Item Name",
+        "Size Name",
+        "Warna Name",
+        "Vendor Name",
+        "SKU",
+        "Item SKU",
+        "Stock",
+        "HPP",
+        "Revenue"
+    ]
+
+    for col in required:
+        if col not in df.columns:
+            raise Exception(f"Missing column: {col}")
+
+    # rename
     df = df.rename(columns={
         "Product Name": "product_name",
         "Item Name": "item_name",
@@ -93,7 +108,6 @@ def load_sheet():
     df["stock"] = df["stock"].fillna(0).astype(int)
 
     return df
-
 
 
 # ============================================
