@@ -309,27 +309,24 @@ def sheet_pull_master():
 # GOOGLE SHEET WRITE BACK (requires Service Account in st.secrets)
 # =========================================================
 def gsheets_client():
-    """
-    Needs in Streamlit secrets:
-      [gcp_service_account]
-      type="service_account"
-      project_id="..."
-      private_key_id="..."
-      private_key="-----BEGIN PRIVATE KEY-----\n...\n-----END PRIVATE KEY-----\n"
-      client_email="...@....iam.gserviceaccount.com"
-      ...etc
-    And that service account email must have access to the Google Sheet (share as Editor).
-    """
+
     if not HAS_GSHEETS_WRITE:
-        raise Exception("Library Google Sheets tidak tersedia. Tambahkan 'gspread' + 'google-auth' di requirements.")
+        raise Exception("gspread tidak tersedia")
 
     if "gcp_service_account" not in st.secrets:
-        raise Exception("Service Account belum diset di Streamlit secrets (gcp_service_account).")
+        raise Exception("Service Account belum diset")
 
     info = dict(st.secrets["gcp_service_account"])
-    scopes = ["https://www.googleapis.com/auth/spreadsheets"]
+
+    scopes = [
+        "https://www.googleapis.com/auth/spreadsheets",
+        "https://www.googleapis.com/auth/drive"
+    ]
+
     creds = Credentials.from_service_account_info(info, scopes=scopes)
+
     return gspread.authorize(creds)
+
 
 
 def sheet_get_worksheet_and_header():
