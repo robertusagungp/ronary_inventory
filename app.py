@@ -393,6 +393,8 @@ def do_pull_sheet_to_app():
 def do_push_app_to_sheet_stock():
     df_inv = db_get_inventory()
     pushed = sheet_push_stock_from_db(df_inv)
+    st.write("DEBUG pushed SKUs:", list(df_inv["item_sku"])[:10])
+
     return pushed
 
 
