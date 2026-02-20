@@ -5,10 +5,9 @@ import requests
 from io import StringIO
 import datetime as dt
 
-
-# =====================================
+# =====================================================
 # CONFIG
-# =====================================
+# =====================================================
 
 DB_FILE = "ronary_inventory.db"
 
@@ -17,74 +16,96 @@ GOOGLE_SHEET_ID = "1r4Gmtlfh7WPwprRuKTY7K8FbUUC7yboZeb83BjEIDT4"
 SHEET_PRODUCTS = "Final Master Product"
 SHEET_PRICE = "Master Price"
 
-
-# =====================================
+# =====================================================
 # GOOGLE SHEETS LOADER
-# =====================================
+# =====================================================
 
-def sheet_to_csv_url(sheet_name):
+def sheet_url(sheet):
 
-    sheet_name_encoded = sheet_name.replace(" ", "%20")
+    sheet = sheet.replace(" ", "%20")
 
-    return (
-        f"https://docs.google.com/spreadsheets/d/"
-        f"{GOOGLE_SHEET_ID}/export?format=csv&sheet={sheet_name_encoded}"
-    )
+    return f"https://docs.google.com/spreadsheets/d/{GOOGLE_SHEET_ID}/export?format=csv&sheet={sheet}"
 
 
-def load_sheet(sheet_name):
+def load_sheet(sheet):
 
-    url = sheet_to_csv_url(sheet_name)
+    url = sheet_url(sheet)
 
-    response = requests.get(url, timeout=30)
+    r = requests.get(url, timeout=30)
 
-    if response.status_code != 200:
+    if r.status_code != 200:
 
-        raise Exception(
-            f"Failed loading sheet: {sheet_name}\n"
-            f"Status: {response.status_code}\n"
-            f"URL: {url}"
-        )
+        raise Exception(f"Cannot load sheet: {sheet}")
 
-    df = pd.read_csv(StringIO(response.text))
+    df = pd.read_csv(StringIO(r.text))
 
-    if df.empty:
-
-        raise Exception(f"Sheet '{sheet_name}' is empty")
-
-    df.columns = df.columns.str.strip().str.lower()
+    df.columns = df.columns.str.strip()
 
     return df
 
 
-def load_master_products():
+# =====================================================
+# MASTER LOAD
+# =====================================================
+
+def load_master():
 
     df_products = load_sheet(SHEET_PRODUCTS)
 
     df_price = load_sheet(SHEET_PRICE)
 
-    if "sku" not in df_products.columns:
-        raise Exception("Column 'sku' not found in Final Master Product")
+    # normalize
+    df_products = df_products.rename(columns={
+        "Item SKU": "item_sku",
+        "SKU": "base_sku",
+        "Product Name": "product_name",
+        "Item Name": "item_name",
+        "Size Name": "size",
+        "Warna Name": "color",
+        "Vendor Name": "vendor",
+        "Stock": "stock"
+    })
 
-    if "sku" not in df_price.columns:
-        raise Exception("Column 'sku' not found in Master Price")
+    df_price = df_price.rename(columns={
+        "SKU": "base_sku",
+        "HPP": "cost",
+        "Revenue": "price"
+    })
 
-    df = df_products.merge(df_price, on="sku", how="left")
+    # convert currency
+    df_price["cost"] = (
+        df_price["cost"]
+        .astype(str)
+        .str.replace("Rp", "")
+        .str.replace(".", "")
+        .str.replace(",", "")
+        .astype(float)
+    )
 
-    if "cost" not in df.columns:
-        df["cost"] = 0
+    df_price["price"] = (
+        df_price["price"]
+        .astype(str)
+        .str.replace("Rp", "")
+        .str.replace(".", "")
+        .str.replace(",", "")
+        .astype(float)
+    )
 
-    if "price" not in df.columns:
-        df["price"] = 0
+    # join
+    df = df_products.merge(
+        df_price[["base_sku", "cost", "price"]],
+        on="base_sku",
+        how="left"
+    )
 
-    df["is_active"] = 1
+    df["stock"] = df["stock"].fillna(0)
 
     return df
 
 
-# =====================================
-# DATABASE
-# =====================================
+# =====================================================
+# DATABASE INIT
+# =====================================================
 
 def get_conn():
 
@@ -97,34 +118,57 @@ def init_db():
 
     conn.execute("""
     CREATE TABLE IF NOT EXISTS products (
-        sku TEXT PRIMARY KEY,
+
+        item_sku TEXT PRIMARY KEY,
+
+        base_sku TEXT,
+
         product_name TEXT,
-        category TEXT,
-        color TEXT,
+
+        item_name TEXT,
+
         size TEXT,
+
+        color TEXT,
+
+        vendor TEXT,
+
         cost REAL,
+
         price REAL,
-        is_active INTEGER,
+
         created_at TEXT
+
     )
     """)
 
     conn.execute("""
     CREATE TABLE IF NOT EXISTS stock (
-        sku TEXT PRIMARY KEY,
+
+        item_sku TEXT PRIMARY KEY,
+
         qty INTEGER,
+
         updated_at TEXT
+
     )
     """)
 
     conn.execute("""
     CREATE TABLE IF NOT EXISTS movements (
+
         id INTEGER PRIMARY KEY AUTOINCREMENT,
+
         ts TEXT,
-        sku TEXT,
+
+        item_sku TEXT,
+
         movement TEXT,
+
         qty INTEGER,
+
         reason TEXT
+
     )
     """)
 
@@ -132,13 +176,13 @@ def init_db():
     conn.close()
 
 
-# =====================================
-# SYNC PRODUCTS
-# =====================================
+# =====================================================
+# SYNC
+# =====================================================
 
-def sync_products():
+def sync():
 
-    df = load_master_products()
+    df = load_master()
 
     conn = get_conn()
 
@@ -147,45 +191,60 @@ def sync_products():
 
     for _, row in df.iterrows():
 
-        sku = str(row["sku"]).strip().upper()
-
-        name = str(row.get("product_name", ""))
-
-        category = str(row.get("category", ""))
-
-        color = str(row.get("color", ""))
-
-        size = str(row.get("size", ""))
-
-        cost = float(row.get("cost", 0))
-
-        price = float(row.get("price", 0))
+        sku = row["item_sku"]
 
         exists = conn.execute(
-            "SELECT sku FROM products WHERE sku=?",
+
+            "SELECT item_sku FROM products WHERE item_sku=?",
+
             (sku,)
+
         ).fetchone()
 
         if exists:
 
             conn.execute("""
+
             UPDATE products SET
+
+            base_sku=?,
+
             product_name=?,
-            category=?,
-            color=?,
+
+            item_name=?,
+
             size=?,
+
+            color=?,
+
+            vendor=?,
+
             cost=?,
-            price=?,
-            is_active=1
-            WHERE sku=?
+
+            price=?
+
+            WHERE item_sku=?
+
             """, (
-                name,
-                category,
-                color,
-                size,
-                cost,
-                price,
+
+                row["base_sku"],
+
+                row["product_name"],
+
+                row["item_name"],
+
+                row["size"],
+
+                row["color"],
+
+                row["vendor"],
+
+                row["cost"],
+
+                row["price"],
+
                 sku
+
             ))
 
             updated += 1
@@ -193,61 +252,98 @@ def sync_products():
         else:
 
             conn.execute("""
-            INSERT INTO products VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+
+            INSERT INTO products VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+
             """, (
+
                 sku,
-                name,
-                category,
-                color,
-                size,
-                cost,
-                price,
-                1,
+
+                row["base_sku"],
+
+                row["product_name"],
+
+                row["item_name"],
+
+                row["size"],
+
+                row["color"],
+
+                row["vendor"],
+
+                row["cost"],
+
+                row["price"],
+
                 dt.datetime.now().isoformat()
+
             ))
 
             conn.execute("""
+
             INSERT INTO stock VALUES (?, ?, ?)
+
             """, (
+
                 sku,
-                0,
+
+                int(row["stock"]),
+
                 dt.datetime.now().isoformat()
+
             ))
 
             inserted += 1
 
     conn.commit()
+
     conn.close()
 
     return inserted, updated
 
 
-# =====================================
-# STOCK FUNCTIONS
-# =====================================
+# =====================================================
+# STOCK OPS
+# =====================================================
 
 def add_stock(sku, qty):
 
     conn = get_conn()
 
     conn.execute("""
-    UPDATE stock SET qty = qty + ?, updated_at=?
-    WHERE sku=?
+
+    UPDATE stock
+
+    SET qty = qty + ?, updated_at=?
+
+    WHERE item_sku=?
+
     """, (
+
         qty,
+
         dt.datetime.now().isoformat(),
+
         sku
+
     ))
 
     conn.execute("""
-    INSERT INTO movements VALUES (NULL, ?, ?, 'IN', ?, 'MANUAL')
+
+    INSERT INTO movements VALUES(NULL, ?, ?, 'IN', ?, 'MANUAL')
+
     """, (
+
         dt.datetime.now().isoformat(),
+
         sku,
+
         qty
+
     ))
 
     conn.commit()
+
     conn.close()
 
 
@@ -256,46 +352,80 @@ def remove_stock(sku, qty):
     conn = get_conn()
 
     conn.execute("""
-    UPDATE stock SET qty = qty - ?, updated_at=?
-    WHERE sku=?
+
+    UPDATE stock
+
+    SET qty = qty - ?, updated_at=?
+
+    WHERE item_sku=?
+
     """, (
+
         qty,
+
         dt.datetime.now().isoformat(),
+
         sku
+
     ))
 
     conn.execute("""
-    INSERT INTO movements VALUES (NULL, ?, ?, 'OUT', ?, 'SOLD')
+
+    INSERT INTO movements VALUES(NULL, ?, ?, 'OUT', ?, 'SOLD')
+
     """, (
+
         dt.datetime.now().isoformat(),
+
         sku,
+
         qty
+
     ))
 
     conn.commit()
+
     conn.close()
 
 
-# =====================================
+# =====================================================
 # LOAD DATA
-# =====================================
+# =====================================================
 
 def get_inventory():
 
     conn = get_conn()
 
     df = pd.read_sql_query("""
+
     SELECT
-    p.sku,
+
+    p.item_sku,
+
     p.product_name,
-    p.category,
-    p.color,
+
+    p.item_name,
+
     p.size,
+
+    p.color,
+
+    p.vendor,
+
+    p.cost,
+
     p.price,
+
     s.qty
+
     FROM products p
-    JOIN stock s ON p.sku = s.sku
+
+    JOIN stock s
+
+    ON p.item_sku=s.item_sku
+
     ORDER BY p.product_name
+
     """, conn)
 
     conn.close()
@@ -303,13 +433,16 @@ def get_inventory():
     return df
 
 
-def get_products():
+def get_skus():
 
     conn = get_conn()
 
     df = pd.read_sql_query(
-        "SELECT sku FROM products ORDER BY sku",
+
+        "SELECT item_sku FROM products ORDER BY item_sku",
+
         conn
+
     )
 
     conn.close()
@@ -322,8 +455,11 @@ def get_movements():
     conn = get_conn()
 
     df = pd.read_sql_query(
+
         "SELECT * FROM movements ORDER BY id DESC",
+
         conn
+
     )
 
     conn.close()
@@ -331,9 +467,9 @@ def get_movements():
     return df
 
 
-# =====================================
-# APP UI
-# =====================================
+# =====================================================
+# UI
+# =====================================================
 
 st.set_page_config(layout="wide")
 
@@ -347,108 +483,69 @@ menu = st.sidebar.selectbox(
     "Menu",
 
     [
+
         "Dashboard",
-        "Sync Master Product",
+
+        "Sync Master",
+
         "Add Stock",
+
         "Remove Stock",
+
         "Movement History"
+
     ]
+
 )
 
-
-# =====================================
-# DASHBOARD
-# =====================================
 
 if menu == "Dashboard":
 
     df = get_inventory()
 
-    total = df["qty"].sum()
-
-    st.metric("Total Stock", total)
+    st.metric("Total Units", int(df["qty"].sum()))
 
     st.dataframe(df, use_container_width=True)
 
 
-# =====================================
-# SYNC
-# =====================================
-
-elif menu == "Sync Master Product":
-
-    st.write("Sync from Google Sheets")
-
-    if st.button("Test Connection"):
-
-        try:
-
-            df = load_master_products()
-
-            st.success("Connection OK")
-
-            st.dataframe(df.head())
-
-        except Exception as e:
-
-            st.error(str(e))
+elif menu == "Sync Master":
 
     if st.button("Sync Now"):
 
-        try:
+        inserted, updated = sync()
 
-            inserted, updated = sync_products()
+        st.success(f"Inserted {inserted}, Updated {updated}")
 
-            st.success(
-                f"Sync complete. Inserted: {inserted}, Updated: {updated}"
-            )
-
-        except Exception as e:
-
-            st.error(str(e))
-
-
-# =====================================
-# ADD STOCK
-# =====================================
 
 elif menu == "Add Stock":
 
-    products = get_products()
+    skus = get_skus()
 
-    sku = st.selectbox("SKU", products["sku"])
+    sku = st.selectbox("Item SKU", skus["item_sku"])
 
-    qty = st.number_input("Quantity", min_value=1)
+    qty = st.number_input("Qty", min_value=1)
 
     if st.button("Add"):
 
         add_stock(sku, qty)
 
-        st.success("Stock added")
+        st.success("Added")
 
-
-# =====================================
-# REMOVE STOCK
-# =====================================
 
 elif menu == "Remove Stock":
 
-    products = get_products()
+    skus = get_skus()
 
-    sku = st.selectbox("SKU", products["sku"])
+    sku = st.selectbox("Item SKU", skus["item_sku"])
 
-    qty = st.number_input("Quantity", min_value=1)
+    qty = st.number_input("Qty", min_value=1)
 
     if st.button("Remove"):
 
         remove_stock(sku, qty)
 
-        st.success("Stock removed")
+        st.success("Removed")
 
-
-# =====================================
-# HISTORY
-# =====================================
 
 elif menu == "Movement History":
 
