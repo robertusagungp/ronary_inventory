@@ -12,7 +12,9 @@ import re
 DB_FILE = "ronary_inventory.db"
 GOOGLE_SHEET_ID = "1r4Gmtlfh7WPwprRuKTY7K8FbUUC7yboZeb83BjEIDT4"
 SHEET_NAME = "Final Master Product"
-CACHE_TTL = 300
+
+AUTO_SYNC_SECONDS = 15   # ubah: 5 / 10 / 30 sesuai kebutuhan
+REQUEST_TIMEOUT = 30
 
 # =========================
 # DB
@@ -59,12 +61,15 @@ def migrate_schema():
 # =========================
 # SHEET
 # =========================
-def sheet_url():
+def sheet_url(cache_bust: bool = True) -> str:
     sheet = SHEET_NAME.replace(" ", "%20")
-    return f"https://docs.google.com/spreadsheets/d/{GOOGLE_SHEET_ID}/export?format=csv&sheet={sheet}"
+    base = f"https://docs.google.com/spreadsheets/d/{GOOGLE_SHEET_ID}/export?format=csv&sheet={sheet}"
+    if cache_bust:
+        # cache buster so changes are fetched immediately
+        base += f"&_ts={int(dt.datetime.now().timestamp())}"
+    return base
 
 def norm(s: str) -> str:
-    """Aggressive normalize for matching."""
     s = str(s)
     s = s.replace("\ufeff", "")        # BOM
     s = s.replace("\u00a0", " ")       # NBSP
@@ -87,15 +92,9 @@ def rp_to_number(x):
         return 0.0
 
 def detect_header_row(df_raw: pd.DataFrame) -> int:
-    """
-    Find row index that looks like the header.
-    We search for a row containing at least 2-3 signature headers.
-    """
     signatures = {"productname", "itemsku", "sku", "stock", "hpp", "revenue"}
     best_idx = 0
     best_score = -1
-
-    # search first 30 rows
     limit = min(len(df_raw), 30)
     for i in range(limit):
         row = df_raw.iloc[i].tolist()
@@ -104,62 +103,41 @@ def detect_header_row(df_raw: pd.DataFrame) -> int:
         if score > best_score:
             best_score = score
             best_idx = i
-
-    # if score is too low, assume first row is header
     if best_score < 2:
         return 0
     return best_idx
 
-@st.cache_data(ttl=CACHE_TTL)
-def load_products_from_sheet():
-    url = sheet_url()
-    r = requests.get(url, timeout=30)
+def fetch_csv_text() -> str:
+    url = sheet_url(cache_bust=True)
+    headers = {
+        "Cache-Control": "no-cache",
+        "Pragma": "no-cache",
+    }
+    r = requests.get(url, headers=headers, timeout=REQUEST_TIMEOUT)
     if r.status_code != 200:
         raise Exception("Cannot access Google Sheet. Pastikan share: Anyone with link (Viewer).")
+    return r.text
 
-    # Read raw without assuming header
-    df_raw = pd.read_csv(StringIO(r.text), header=None)
-
+def load_products_from_csv_text(csv_text: str):
+    df_raw = pd.read_csv(StringIO(csv_text), header=None)
     header_idx = detect_header_row(df_raw)
 
-    # Build proper df using detected header
     header = df_raw.iloc[header_idx].astype(str).tolist()
-    df = df_raw.iloc[header_idx+1:].copy()
+    df = df_raw.iloc[header_idx + 1:].copy()
     df.columns = header
     df = df.reset_index(drop=True)
 
-    # Clean column names (keep original + normalized map)
     df.columns = [str(c).replace("\ufeff","").replace("\u00a0"," ").strip() for c in df.columns]
     col_map = {norm(c): c for c in df.columns}
 
-    # Expected columns in your sheet:
-    # Product Name, Item Name, Size Name, Warna Name, Vendor Name, SKU, Item SKU, Stock, HPP, Revenue
-    required_norm = {
-        "productname": None,
-        "itemname": None,
-        "sizename": None,
-        "warnaname": None,
-        "vendorname": None,
-        "sku": None,
-        "itemsku": None,
-        "stock": None,
-        "hpp": None,
-        "revenue": None,
-    }
-
-    missing = []
-    for k in list(required_norm.keys()):
-        if k not in col_map:
-            missing.append(k)
-
+    needed = ["productname","itemname","sizename","warnaname","vendorname","sku","itemsku","stock","hpp","revenue"]
+    missing = [k for k in needed if k not in col_map]
     if missing:
         raise Exception(
-            "Header tidak terbaca benar dari CSV export. "
-            f"Missing(normalized)={missing}. Detected columns={list(df.columns)}. "
-            f"HeaderRowIndex={header_idx}"
+            f"Header/kolom tidak terbaca benar. Missing(normalized)={missing}. "
+            f"Detected={list(df.columns)} | header_row_index={header_idx}"
         )
 
-    # Create normalized output
     out = pd.DataFrame()
     out["product_name"] = df[col_map["productname"]].astype(str).str.strip()
     out["item_name"] = df[col_map["itemname"]].astype(str).str.strip()
@@ -175,13 +153,18 @@ def load_products_from_sheet():
     out["price"] = df[col_map["revenue"]].apply(rp_to_number)
 
     out = out[out["item_sku"] != ""].copy()
-    return out, {"detected_columns": list(df.columns), "header_row_index": header_idx, "preview_raw": df_raw.head(8)}
+
+    debug = {
+        "detected_columns": list(df.columns),
+        "header_row_index": header_idx,
+        "raw_preview": df_raw.head(8)
+    }
+    return out, debug
 
 # =========================
 # SYNC
 # =========================
-def sync_master():
-    df, dbg = load_products_from_sheet()
+def upsert_master(df: pd.DataFrame):
     conn = get_conn()
     inserted = 0
     updated = 0
@@ -192,7 +175,6 @@ def sync_master():
             continue
 
         exists = conn.execute("SELECT 1 FROM products WHERE item_sku=?", (sku,)).fetchone()
-
         if exists:
             conn.execute("""
             UPDATE products SET
@@ -226,10 +208,30 @@ def sync_master():
 
     conn.commit()
     conn.close()
-    return inserted, updated, dbg
+    return inserted, updated
+
+def run_sync(force: bool = False):
+    """
+    Sync only if sheet content changed (hash), unless force=True.
+    """
+    csv_text = fetch_csv_text()
+    content_hash = hash(csv_text)
+
+    if "last_sheet_hash" not in st.session_state:
+        st.session_state.last_sheet_hash = None
+
+    changed = (st.session_state.last_sheet_hash != content_hash)
+
+    if force or changed:
+        df, dbg = load_products_from_csv_text(csv_text)
+        ins, upd = upsert_master(df)
+        st.session_state.last_sheet_hash = content_hash
+        return True, f"SYNC OK (inserted={ins}, updated={upd})", dbg
+    else:
+        return True, "No changes detected (already up-to-date).", None
 
 # =========================
-# INVENTORY OPS
+# INVENTORY
 # =========================
 def get_inventory():
     conn = get_conn()
@@ -278,39 +280,61 @@ def get_movements():
     return df
 
 # =========================
-# STARTUP
-# =========================
-migrate_schema()
-
-sync_ok = True
-sync_status = ""
-sync_debug = None
-
-try:
-    ins, upd, dbg = sync_master()
-    sync_status = f"Auto Sync OK (Inserted {ins}, Updated {upd})"
-    sync_debug = dbg
-except Exception as e:
-    sync_ok = False
-    sync_status = f"Auto Sync FAILED: {e}"
-
-# =========================
-# UI
+# UI + AUTO REFRESH
 # =========================
 st.set_page_config(layout="wide")
 st.title("Ronary Inventory System")
 
-if sync_ok:
-    st.caption(sync_status)
+migrate_schema()
+
+# Auto refresh (timer rerun)
+try:
+    st.autorefresh(interval=AUTO_SYNC_SECONDS * 1000, key="ronary_autorefresh")
+except Exception:
+    # fallback if older streamlit: do nothing (still can use Force Sync)
+    pass
+
+# Top control bar
+left, mid, right = st.columns([2, 2, 2])
+
+with left:
+    st.write(f"Auto-sync interval: **{AUTO_SYNC_SECONDS}s**")
+
+with mid:
+    force = st.button("🔄 Force Sync Now")
+
+with right:
+    # status placeholder
+    status_box = st.empty()
+
+syncing_box = st.empty()
+
+# Run sync on every rerun, but actually update DB only if content changed
+syncing_box.info("Syncing...")
+ok = True
+msg = ""
+dbg = None
+
+try:
+    ok, msg, dbg = run_sync(force=force)
+except Exception as e:
+    ok = False
+    msg = f"SYNC FAILED: {e}"
+
+syncing_box.empty()
+
+if ok:
+    status_box.success(msg)
 else:
-    st.error(sync_status)
-    st.info("Aplikasi tetap jalan (tidak crash). Silakan buka debug di bawah untuk lihat header/kolom yang kebaca.")
-    with st.expander("Debug (kolom & raw preview dari CSV export)"):
-        if sync_debug:
-            st.write("Detected columns:", sync_debug.get("detected_columns"))
-            st.write("Header row index:", sync_debug.get("header_row_index"))
+    status_box.error(msg)
+
+if (not ok) or (dbg is not None and force):
+    with st.expander("Debug (kolom & preview CSV export)"):
+        if dbg:
+            st.write("Detected columns:", dbg.get("detected_columns"))
+            st.write("Header row index:", dbg.get("header_row_index"))
             st.write("Raw preview (top rows):")
-            st.dataframe(sync_debug.get("preview_raw"))
+            st.dataframe(dbg.get("raw_preview"))
 
 menu = st.sidebar.selectbox("Menu", ["Dashboard", "Add Stock", "Remove Stock", "Movement History"])
 
@@ -325,7 +349,7 @@ if menu == "Dashboard":
 
 elif menu == "Add Stock":
     if df.empty:
-        st.warning("Data inventory kosong. Pastikan auto-sync berhasil.")
+        st.warning("Data inventory kosong. Pastikan sync berhasil.")
     else:
         sku = st.selectbox("Item SKU", df["item_sku"].tolist())
         qty = st.number_input("Qty", min_value=1, value=1)
@@ -335,7 +359,7 @@ elif menu == "Add Stock":
 
 elif menu == "Remove Stock":
     if df.empty:
-        st.warning("Data inventory kosong. Pastikan auto-sync berhasil.")
+        st.warning("Data inventory kosong. Pastikan sync berhasil.")
     else:
         sku = st.selectbox("Item SKU", df["item_sku"].tolist())
         qty = st.number_input("Qty", min_value=1, value=1)
@@ -345,27 +369,3 @@ elif menu == "Remove Stock":
 
 elif menu == "Movement History":
     st.dataframe(get_movements(), use_container_width=True)
-
-
-# =========================
-# AUTO REFRESH SYNC
-# =========================
-
-AUTO_SYNC_SECONDS = 3  # ubah ke 5, 10, 30, dll sesuai kebutuhan
-
-now = dt.datetime.now().timestamp()
-
-if "last_sync_time" not in st.session_state:
-    st.session_state.last_sync_time = 0
-
-if now - st.session_state.last_sync_time > AUTO_SYNC_SECONDS:
-    try:
-        ins, upd, dbg = sync_master()
-        st.session_state.last_sync_time = now
-        st.session_state.sync_status_live = f"Live Sync OK ({ins} inserted, {upd} updated)"
-    except Exception as e:
-        st.session_state.sync_status_live = f"Live Sync Failed: {e}"
-
-# tampilkan status live sync
-if "sync_status_live" in st.session_state:
-    st.caption(st.session_state.sync_status_live)
