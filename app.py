@@ -342,54 +342,46 @@ def sheet_get_worksheet_and_header():
 
 
 def sheet_push_stock_from_db(df_inventory: pd.DataFrame):
-    """
-    Push ONLY Stock column (App -> Sheet) by matching Item SKU.
-    Safe writeback: updates Stock cells only.
-    """
+
     ws, header = sheet_get_worksheet_and_header()
 
-    # Find required columns index in sheet
     try:
         col_itemsku = header.index("Item SKU") + 1
         col_stock = header.index("Stock") + 1
     except ValueError:
-        raise Exception(f"Header sheet tidak cocok. Header row1 terbaca: {header}")
+        raise Exception(f"Header sheet tidak cocok. Header terbaca: {header}")
 
-    # Build map item_sku -> row_number in sheet
-    # Get all item sku values in sheet (column)
+    # map item sku -> row
     itemsku_col = ws.col_values(col_itemsku)
-    # row 1 is header
+
     row_map = {}
     for i, v in enumerate(itemsku_col[1:], start=2):
         v = str(v).strip()
         if v:
             row_map[v] = i
 
-    # Prepare batch updates
     updates = []
-    pushed = 0
 
     for _, r in df_inventory.iterrows():
-        item_sku = str(r["item_sku"]).strip()
-        if not item_sku:
-            continue
-        if item_sku not in row_map:
+
+        sku = str(r["item_sku"]).strip()
+
+        if sku not in row_map:
             continue
 
-        row = row_map[item_sku]
+        row = row_map[sku]
+
         new_stock = int(r["qty"])
 
-        updates.append({
-            "range": gspread.utils.rowcol_to_a1(row, col_stock),
-            "values": [[new_stock]]
-        })
-        pushed += 1
+        cell = gspread.Cell(row, col_stock, new_stock)
 
-    # Apply batch
+        updates.append(cell)
+
     if updates:
-        ws.batch_update(updates)
+        ws.update_cells(updates)
 
-    return pushed
+    return len(updates)
+
 
 
 # =========================================================
