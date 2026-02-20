@@ -439,8 +439,13 @@ syncing = st.empty()
 status_box = st.empty()
 
 # Decide when to pull
-should_pull = True  # every refresh tick triggers pull; safe because pull is idempotent
+# IMPORTANT: jangan auto-pull kalau ada perubahan lokal (local_dirty_stock),
+# karena itu akan overwrite stok lokal dari sheet.
+should_pull = False
+
 if force_pull:
+    should_pull = True
+elif not st.session_state.get("local_dirty_stock", False):
     should_pull = True
 
 # PULL (Sheet -> App)
@@ -592,6 +597,7 @@ elif menu == "Add Stock":
         reason = st.text_input("Reason (optional)", value="RESTOCK")
         if st.button("✅ Add"):
             db_adjust_stock(sku, int(qty), movement="IN", reason=reason.strip() or "IN")
+            st.session_state["sync_msg"] = "LOCAL CHANGE OK | waiting push or auto-push"
             st.success("Stock updated locally.")
             st.rerun()
 
@@ -614,6 +620,7 @@ elif menu == "Remove Stock":
                 st.error("Tidak bisa remove melebihi stok saat ini (qty jadi negatif).")
             else:
                 db_adjust_stock(sku, -int(qty), movement="OUT", reason=reason.strip() or "OUT")
+                st.session_state["sync_msg"] = "LOCAL CHANGE OK | waiting push or auto-push"
                 st.success("Stock updated locally.")
                 st.rerun()
 
