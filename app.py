@@ -345,3 +345,27 @@ elif menu == "Remove Stock":
 
 elif menu == "Movement History":
     st.dataframe(get_movements(), use_container_width=True)
+
+
+# =========================
+# AUTO REFRESH SYNC
+# =========================
+
+AUTO_SYNC_SECONDS = 15  # ubah ke 5, 10, 30, dll sesuai kebutuhan
+
+now = dt.datetime.now().timestamp()
+
+if "last_sync_time" not in st.session_state:
+    st.session_state.last_sync_time = 0
+
+if now - st.session_state.last_sync_time > AUTO_SYNC_SECONDS:
+    try:
+        ins, upd, dbg = sync_master()
+        st.session_state.last_sync_time = now
+        st.session_state.sync_status_live = f"Live Sync OK ({ins} inserted, {upd} updated)"
+    except Exception as e:
+        st.session_state.sync_status_live = f"Live Sync Failed: {e}"
+
+# tampilkan status live sync
+if "sync_status_live" in st.session_state:
+    st.caption(st.session_state.sync_status_live)
