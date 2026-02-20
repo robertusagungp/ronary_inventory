@@ -479,7 +479,6 @@ if force_push:
         st.session_state["sync_msg"] = f"FORCE PUSH OK | rows_pushed={pushed}"
         st.session_state["local_dirty_stock"] = False
     except Exception as e:
-        except Exception as e:
         import traceback
         st.session_state["sync_ok"] = False
         st.session_state["sync_msg"] = f"FORCE PUSH FAILED: {str(e)}"
