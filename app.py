@@ -351,7 +351,7 @@ elif menu == "Movement History":
 # AUTO REFRESH SYNC
 # =========================
 
-AUTO_SYNC_SECONDS = 15  # ubah ke 5, 10, 30, dll sesuai kebutuhan
+AUTO_SYNC_SECONDS = 3  # ubah ke 5, 10, 30, dll sesuai kebutuhan
 
 now = dt.datetime.now().timestamp()
 
