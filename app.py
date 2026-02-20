@@ -15,9 +15,6 @@ DB_FILE = "ronary_inventory.db"
 GOOGLE_SHEET_ID = "1r4Gmtlfh7WPwprRuKTY7K8FbUUC7yboZeb83BjEIDT4"
 SHEET_NAME = "Final Master Product"
 
-CACHE_TTL = 300
-
-
 # =====================================================
 # DATABASE
 # =====================================================
@@ -69,7 +66,7 @@ def migrate_schema():
 
 
 # =====================================================
-# GOOGLE SHEETS
+# GOOGLE SHEET LOADER
 # =====================================================
 
 def sheet_url():
@@ -79,18 +76,9 @@ def sheet_url():
     return f"https://docs.google.com/spreadsheets/d/{GOOGLE_SHEET_ID}/export?format=csv&sheet={sheet}"
 
 
-def normalize_col(x):
+def clean_col(x):
 
-    x = str(x)
-
-    x = x.replace("\ufeff","")
-    x = x.replace("\u00a0"," ")
-
-    x = x.strip().lower()
-
-    x = re.sub(r"\s+", "", x)
-
-    return x
+    return str(x).strip()
 
 
 def rp_to_number(x):
@@ -109,7 +97,7 @@ def rp_to_number(x):
     return float(x)
 
 
-@st.cache_data(ttl=CACHE_TTL)
+@st.cache_data(ttl=300)
 def load_sheet():
 
     url = sheet_url()
@@ -118,52 +106,52 @@ def load_sheet():
 
     if r.status_code != 200:
 
-        raise Exception("Cannot load Google Sheet")
+        raise Exception("Cannot access Google Sheet. Make sure sharing = Anyone with link")
 
     df = pd.read_csv(StringIO(r.text))
 
-    # normalize column names
-    col_map = {normalize_col(c):c for c in df.columns}
+    # clean column names
+    df.columns = [clean_col(c) for c in df.columns]
 
     required = [
-        "itemsku",
-        "sku",
-        "productname",
-        "itemname",
-        "sizename",
-        "warnaname",
-        "vendorname",
-        "stock",
-        "hpp",
-        "revenue"
+        "Item SKU",
+        "SKU",
+        "Product Name",
+        "Item Name",
+        "Size Name",
+        "Warna Name",
+        "Vendor Name",
+        "Stock",
+        "HPP",
+        "Revenue"
     ]
 
-    missing = [c for c in required if c not in col_map]
+    missing = [c for c in required if c not in df.columns]
 
     if missing:
         raise Exception(f"Missing columns: {missing}")
 
     out = pd.DataFrame()
 
-    out["item_sku"] = df[col_map["itemsku"]].astype(str).str.strip()
+    out["item_sku"] = df["Item SKU"].astype(str).str.strip()
 
-    out["base_sku"] = df[col_map["sku"]].astype(str).str.strip()
+    out["base_sku"] = df["SKU"].astype(str).str.strip()
 
-    out["product_name"] = df[col_map["productname"]]
+    out["product_name"] = df["Product Name"]
 
-    out["item_name"] = df[col_map["itemname"]]
+    out["item_name"] = df["Item Name"]
 
-    out["size"] = df[col_map["sizename"]]
+    out["size"] = df["Size Name"]
 
-    out["color"] = df[col_map["warnaname"]]
+    out["color"] = df["Warna Name"]
 
-    out["vendor"] = df[col_map["vendorname"]]
+    out["vendor"] = df["Vendor Name"]
 
-    out["stock"] = pd.to_numeric(df[col_map["stock"]], errors="coerce").fillna(0)
+    out["stock"] = pd.to_numeric(df["Stock"], errors="coerce").fillna(0)
 
-    out["cost"] = df[col_map["hpp"]].apply(rp_to_number)
+    out["cost"] = df["HPP"].apply(rp_to_number)
 
-    out["price"] = df[col_map["revenue"]].apply(rp_to_number)
+    out["price"] = df["Revenue"].apply(rp_to_number)
 
     out = out[out["item_sku"] != ""]
 
@@ -293,12 +281,6 @@ def add_stock(item_sku, qty):
     (qty,dt.datetime.now().isoformat(),item_sku)
     )
 
-    conn.execute("""
-    INSERT INTO movements VALUES (NULL,?,?,?,?,?)
-    """,
-    (dt.datetime.now().isoformat(),item_sku,"IN",qty,"MANUAL")
-    )
-
     conn.commit()
     conn.close()
 
@@ -314,12 +296,6 @@ def remove_stock(item_sku, qty):
     WHERE item_sku=?
     """,
     (qty,dt.datetime.now().isoformat(),item_sku)
-    )
-
-    conn.execute("""
-    INSERT INTO movements VALUES (NULL,?,?,?,?,?)
-    """,
-    (dt.datetime.now().isoformat(),item_sku,"OUT",qty,"SOLD")
     )
 
     conn.commit()
