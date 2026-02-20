@@ -1,9 +1,3 @@
-
----
-
-## 5) `app.py` (FULL APP)
-
-```python
 import sqlite3
 import datetime as dt
 from pathlib import Path
