@@ -4,7 +4,6 @@ import pandas as pd
 import requests
 from io import StringIO
 import datetime as dt
-import os
 
 # =====================================================
 # CONFIG
@@ -28,79 +27,65 @@ def get_conn():
     return sqlite3.connect(DB_FILE, check_same_thread=False)
 
 
-def table_exists(conn, name):
-
-    return conn.execute(
-        "SELECT name FROM sqlite_master WHERE type='table' AND name=?",
-        (name,)
-    ).fetchone() is not None
-
-
 def migrate_schema():
 
     conn = get_conn()
 
-    if not table_exists(conn, "products"):
+    conn.execute("""
+    CREATE TABLE IF NOT EXISTS products (
 
-        conn.execute("""
-        CREATE TABLE products (
+        item_sku TEXT PRIMARY KEY,
 
-            item_sku TEXT PRIMARY KEY,
+        base_sku TEXT,
 
-            base_sku TEXT,
+        product_name TEXT,
 
-            product_name TEXT,
+        item_name TEXT,
 
-            item_name TEXT,
+        size TEXT,
 
-            size TEXT,
+        color TEXT,
 
-            color TEXT,
+        vendor TEXT,
 
-            vendor TEXT,
+        cost REAL,
 
-            cost REAL,
+        price REAL,
 
-            price REAL,
+        created_at TEXT
 
-            created_at TEXT
+    )
+    """)
 
-        )
-        """)
+    conn.execute("""
+    CREATE TABLE IF NOT EXISTS stock (
 
-    if not table_exists(conn, "stock"):
+        item_sku TEXT PRIMARY KEY,
 
-        conn.execute("""
-        CREATE TABLE stock (
+        qty INTEGER,
 
-            item_sku TEXT PRIMARY KEY,
+        updated_at TEXT
 
-            qty INTEGER,
+    )
+    """)
 
-            updated_at TEXT
+    conn.execute("""
+    CREATE TABLE IF NOT EXISTS movements (
 
-        )
-        """)
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
 
-    if not table_exists(conn, "movements"):
+        ts TEXT,
 
-        conn.execute("""
-        CREATE TABLE movements (
+        item_sku TEXT,
 
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
+        movement TEXT,
 
-            ts TEXT,
+        qty INTEGER,
 
-            item_sku TEXT,
+        reason TEXT
 
-            movement TEXT,
-
-            qty INTEGER,
-
-            reason TEXT
-
-        )
-        """)
+    )
+    """)
 
     conn.commit()
     conn.close()
@@ -125,13 +110,22 @@ def load_sheet(sheet):
     r = requests.get(url)
 
     if r.status_code != 200:
-        raise Exception(f"Failed loading sheet: {sheet}")
+        raise Exception(f"Cannot load {sheet}")
 
     df = pd.read_csv(StringIO(r.text))
 
     df.columns = df.columns.str.strip().str.lower()
 
     return df
+
+
+def find_column(df, possible_names):
+
+    for name in possible_names:
+        if name in df.columns:
+            return name
+
+    return None
 
 
 def clean_currency(series):
@@ -153,52 +147,49 @@ def load_master():
     df_products = load_sheet(SHEET_PRODUCTS)
     df_price = load_sheet(SHEET_PRICE)
 
-    # rename products
-    rename_products = {
+    # auto detect columns
+    col_item_sku = find_column(df_products, ["item sku"])
+    col_base_sku = find_column(df_products, ["sku"])
+    col_product = find_column(df_products, ["product name"])
+    col_item = find_column(df_products, ["item name"])
+    col_size = find_column(df_products, ["size name"])
+    col_color = find_column(df_products, ["warna name"])
+    col_vendor = find_column(df_products, ["vendor name"])
+    col_stock = find_column(df_products, ["stock"])
 
-        "item sku": "item_sku",
-        "sku": "base_sku",
-        "product name": "product_name",
-        "item name": "item_name",
-        "size name": "size",
-        "warna name": "color",
-        "vendor name": "vendor",
-        "stock": "stock"
+    if col_item_sku is None:
+        raise Exception(f"Item SKU column not found. Available: {df_products.columns}")
 
-    }
+    df_products = df_products.rename(columns={
+        col_item_sku: "item_sku",
+        col_base_sku: "base_sku",
+        col_product: "product_name",
+        col_item: "item_name",
+        col_size: "size",
+        col_color: "color",
+        col_vendor: "vendor"
+    })
 
-    df_products = df_products.rename(columns=rename_products)
-
-    if "stock" not in df_products.columns:
+    if col_stock:
+        df_products = df_products.rename(columns={col_stock: "stock"})
+    else:
         df_products["stock"] = 0
 
-    df_products["stock"] = pd.to_numeric(
-        df_products["stock"],
-        errors="coerce"
-    ).fillna(0)
+    df_products["stock"] = pd.to_numeric(df_products["stock"], errors="coerce").fillna(0)
 
-    # rename price
-    rename_price = {
+    # price
+    col_price_sku = find_column(df_price, ["sku"])
+    col_cost = find_column(df_price, ["hpp"])
+    col_price = find_column(df_price, ["revenue"])
 
-        "sku": "base_sku",
-        "hpp": "cost",
-        "revenue": "price"
+    df_price = df_price.rename(columns={
+        col_price_sku: "base_sku",
+        col_cost: "cost",
+        col_price: "price"
+    })
 
-    }
-
-    df_price = df_price.rename(columns=rename_price)
-
-    if "cost" in df_price.columns:
-        df_price["cost"] = clean_currency(df_price["cost"])
-
-    else:
-        df_price["cost"] = 0
-
-    if "price" in df_price.columns:
-        df_price["price"] = clean_currency(df_price["price"])
-
-    else:
-        df_price["price"] = 0
+    df_price["cost"] = clean_currency(df_price["cost"])
+    df_price["price"] = clean_currency(df_price["price"])
 
     df = df_products.merge(
         df_price[["base_sku", "cost", "price"]],
@@ -224,7 +215,7 @@ def auto_sync():
 
     for _, row in df.iterrows():
 
-        sku = row["item_sku"]
+        sku = str(row["item_sku"]).strip()
 
         exists = conn.execute(
             "SELECT item_sku FROM products WHERE item_sku=?",
@@ -249,14 +240,14 @@ def auto_sync():
 
             """, (
 
-                row["base_sku"],
-                row["product_name"],
-                row["item_name"],
-                row["size"],
-                row["color"],
-                row["vendor"],
-                row["cost"],
-                row["price"],
+                row.get("base_sku", ""),
+                row.get("product_name", ""),
+                row.get("item_name", ""),
+                row.get("size", ""),
+                row.get("color", ""),
+                row.get("vendor", ""),
+                row.get("cost", 0),
+                row.get("price", 0),
                 sku
 
             ))
@@ -268,14 +259,14 @@ def auto_sync():
             """, (
 
                 sku,
-                row["base_sku"],
-                row["product_name"],
-                row["item_name"],
-                row["size"],
-                row["color"],
-                row["vendor"],
-                row["cost"],
-                row["price"],
+                row.get("base_sku", ""),
+                row.get("product_name", ""),
+                row.get("item_name", ""),
+                row.get("size", ""),
+                row.get("color", ""),
+                row.get("vendor", ""),
+                row.get("cost", 0),
+                row.get("price", 0),
                 dt.datetime.now().isoformat()
 
             ))
@@ -285,7 +276,7 @@ def auto_sync():
             """, (
 
                 sku,
-                int(row["stock"]),
+                int(row.get("stock", 0)),
                 dt.datetime.now().isoformat()
 
             ))
@@ -295,47 +286,7 @@ def auto_sync():
 
 
 # =====================================================
-# STOCK OPS
-# =====================================================
-
-def add_stock(sku, qty):
-
-    conn = get_conn()
-
-    conn.execute(
-        "UPDATE stock SET qty=qty+?, updated_at=? WHERE item_sku=?",
-        (qty, dt.datetime.now().isoformat(), sku)
-    )
-
-    conn.execute(
-        "INSERT INTO movements VALUES(NULL, ?, ?, 'IN', ?, 'MANUAL')",
-        (dt.datetime.now().isoformat(), sku, qty)
-    )
-
-    conn.commit()
-    conn.close()
-
-
-def remove_stock(sku, qty):
-
-    conn = get_conn()
-
-    conn.execute(
-        "UPDATE stock SET qty=qty-?, updated_at=? WHERE item_sku=?",
-        (qty, dt.datetime.now().isoformat(), sku)
-    )
-
-    conn.execute(
-        "INSERT INTO movements VALUES(NULL, ?, ?, 'OUT', ?, 'SOLD')",
-        (dt.datetime.now().isoformat(), sku, qty)
-    )
-
-    conn.commit()
-    conn.close()
-
-
-# =====================================================
-# LOAD INVENTORY
+# INVENTORY
 # =====================================================
 
 def get_inventory():
@@ -392,68 +343,15 @@ menu = st.sidebar.selectbox(
 
     "Menu",
 
-    [
-
-        "Dashboard",
-        "Add Stock",
-        "Remove Stock",
-        "Movement History"
-
-    ]
+    ["Dashboard"]
 
 )
 
 
-if menu == "Dashboard":
+df = get_inventory()
 
-    df = get_inventory()
+st.metric("Total Units", int(df.qty.sum()))
+st.metric("Total Value", int((df.price * df.qty).sum()))
+st.metric("Total Profit", int((df.profit * df.qty).sum()))
 
-    col1, col2, col3 = st.columns(3)
-
-    col1.metric("Total Units", int(df.qty.sum()))
-    col2.metric("Total Value", int((df.price * df.qty).sum()))
-    col3.metric("Total Profit Potential", int((df.profit * df.qty).sum()))
-
-    st.dataframe(df, use_container_width=True)
-
-
-elif menu == "Add Stock":
-
-    df = get_inventory()
-
-    sku = st.selectbox("Item SKU", df.item_sku)
-
-    qty = st.number_input("Qty", min_value=1)
-
-    if st.button("Add"):
-
-        add_stock(sku, qty)
-        st.rerun()
-
-
-elif menu == "Remove Stock":
-
-    df = get_inventory()
-
-    sku = st.selectbox("Item SKU", df.item_sku)
-
-    qty = st.number_input("Qty", min_value=1)
-
-    if st.button("Remove"):
-
-        remove_stock(sku, qty)
-        st.rerun()
-
-
-elif menu == "Movement History":
-
-    conn = get_conn()
-
-    df = pd.read_sql_query(
-        "SELECT * FROM movements ORDER BY id DESC",
-        conn
-    )
-
-    conn.close()
-
-    st.dataframe(df, use_container_width=True)
+st.dataframe(df, use_container_width=True)
