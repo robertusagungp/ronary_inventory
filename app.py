@@ -15,6 +15,7 @@ DB_FILE = "ronary_inventory.db"
 GOOGLE_SHEET_ID = "1r4Gmtlfh7WPwprRuKTY7K8FbUUC7yboZeb83BjEIDT4"
 SHEET_NAME = "Final Master Product"
 
+
 # =====================================================
 # DATABASE
 # =====================================================
@@ -76,11 +77,6 @@ def sheet_url():
     return f"https://docs.google.com/spreadsheets/d/{GOOGLE_SHEET_ID}/export?format=csv&sheet={sheet}"
 
 
-def clean_col(x):
-
-    return str(x).strip()
-
-
 def rp_to_number(x):
 
     x = str(x)
@@ -106,14 +102,14 @@ def load_sheet():
 
     if r.status_code != 200:
 
-        raise Exception("Cannot access Google Sheet. Make sure sharing = Anyone with link")
+        raise Exception("Cannot access Google Sheet. Make sure sharing is PUBLIC.")
 
     df = pd.read_csv(StringIO(r.text))
 
-    # clean column names
-    df.columns = [clean_col(c) for c in df.columns]
+    # STRIP COLUMN NAMES
+    df.columns = df.columns.str.strip()
 
-    required = [
+    required_cols = [
         "Item SKU",
         "SKU",
         "Product Name",
@@ -126,10 +122,10 @@ def load_sheet():
         "Revenue"
     ]
 
-    missing = [c for c in required if c not in df.columns]
+    missing = [c for c in required_cols if c not in df.columns]
 
     if missing:
-        raise Exception(f"Missing columns: {missing}")
+        raise Exception(f"Missing columns in sheet: {missing}")
 
     out = pd.DataFrame()
 
@@ -182,14 +178,14 @@ def sync_master():
 
             conn.execute("""
             UPDATE products SET
-            base_sku=?,
-            product_name=?,
-            item_name=?,
-            size=?,
-            color=?,
-            vendor=?,
-            cost=?,
-            price=?
+                base_sku=?,
+                product_name=?,
+                item_name=?,
+                size=?,
+                color=?,
+                vendor=?,
+                cost=?,
+                price=?
             WHERE item_sku=?
             """,
             (
@@ -251,15 +247,23 @@ def get_inventory():
 
     df = pd.read_sql_query("""
 
-    SELECT
-    p.*,
-    s.qty,
-    (p.price - p.cost) profit
+        SELECT
+            p.item_sku,
+            p.base_sku,
+            p.product_name,
+            p.item_name,
+            p.size,
+            p.color,
+            p.vendor,
+            p.cost,
+            p.price,
+            s.qty,
+            (p.price - p.cost) profit
 
-    FROM products p
-    JOIN stock s ON p.item_sku=s.item_sku
+        FROM products p
+        JOIN stock s ON p.item_sku=s.item_sku
 
-    ORDER BY product_name,color,size
+        ORDER BY product_name,color,size
 
     """, conn)
 
@@ -273,13 +277,12 @@ def add_stock(item_sku, qty):
     conn = get_conn()
 
     conn.execute("""
-    UPDATE stock
-    SET qty=qty+?,
-    updated_at=?
-    WHERE item_sku=?
+        UPDATE stock
+        SET qty=qty+?,
+        updated_at=?
+        WHERE item_sku=?
     """,
-    (qty,dt.datetime.now().isoformat(),item_sku)
-    )
+    (qty,dt.datetime.now().isoformat(),item_sku))
 
     conn.commit()
     conn.close()
@@ -290,13 +293,12 @@ def remove_stock(item_sku, qty):
     conn = get_conn()
 
     conn.execute("""
-    UPDATE stock
-    SET qty=qty-?,
-    updated_at=?
-    WHERE item_sku=?
+        UPDATE stock
+        SET qty=qty-?,
+        updated_at=?
+        WHERE item_sku=?
     """,
-    (qty,dt.datetime.now().isoformat(),item_sku)
-    )
+    (qty,dt.datetime.now().isoformat(),item_sku))
 
     conn.commit()
     conn.close()
