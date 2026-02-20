@@ -1,2 +1,5 @@
-streamlit>=1.31.0
-pandas>=2.0.0
+streamlit
+pandas
+requests
+gspread
+google-auth
