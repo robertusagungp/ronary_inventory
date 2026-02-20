@@ -17,43 +17,29 @@ GOOGLE_SHEET_ID = "1r4Gmtlfh7WPwprRuKTY7K8FbUUC7yboZeb83BjEIDT4"
 SHEET_PRODUCTS = "Final Master Product"
 SHEET_PRICE = "Master Price"
 
-SYNC_CACHE_SECONDS = 300
+CACHE_TTL = 300
 
 
 # =====================================================
-# DATABASE CONNECTION
+# DATABASE
 # =====================================================
 
 def get_conn():
     return sqlite3.connect(DB_FILE, check_same_thread=False)
 
 
-# =====================================================
-# AUTO MIGRATION
-# =====================================================
+def table_exists(conn, name):
 
-def table_exists(conn, table):
-
-    result = conn.execute(
+    return conn.execute(
         "SELECT name FROM sqlite_master WHERE type='table' AND name=?",
-        (table,)
-    ).fetchone()
-
-    return result is not None
-
-
-def get_columns(conn, table):
-
-    cursor = conn.execute(f"PRAGMA table_info({table})")
-
-    return [row[1] for row in cursor.fetchall()]
+        (name,)
+    ).fetchone() is not None
 
 
 def migrate_schema():
 
     conn = get_conn()
 
-    # PRODUCTS TABLE
     if not table_exists(conn, "products"):
 
         conn.execute("""
@@ -82,31 +68,6 @@ def migrate_schema():
         )
         """)
 
-    else:
-
-        cols = get_columns(conn, "products")
-
-        required = [
-            "item_sku",
-            "base_sku",
-            "product_name",
-            "item_name",
-            "size",
-            "color",
-            "vendor",
-            "cost",
-            "price"
-        ]
-
-        for col in required:
-
-            if col not in cols:
-
-                conn.execute(
-                    f"ALTER TABLE products ADD COLUMN {col} TEXT"
-                )
-
-    # STOCK TABLE
     if not table_exists(conn, "stock"):
 
         conn.execute("""
@@ -121,7 +82,6 @@ def migrate_schema():
         )
         """)
 
-    # MOVEMENTS TABLE
     if not table_exists(conn, "movements"):
 
         conn.execute("""
@@ -157,64 +117,88 @@ def sheet_url(sheet):
     return f"https://docs.google.com/spreadsheets/d/{GOOGLE_SHEET_ID}/export?format=csv&sheet={sheet}"
 
 
-@st.cache_data(ttl=SYNC_CACHE_SECONDS)
+@st.cache_data(ttl=CACHE_TTL)
 def load_sheet(sheet):
 
     url = sheet_url(sheet)
 
-    r = requests.get(url, timeout=30)
+    r = requests.get(url)
 
     if r.status_code != 200:
-        raise Exception(f"Cannot load {sheet}")
+        raise Exception(f"Failed loading sheet: {sheet}")
 
     df = pd.read_csv(StringIO(r.text))
 
-    df.columns = df.columns.str.strip()
+    df.columns = df.columns.str.strip().str.lower()
 
     return df
 
 
-@st.cache_data(ttl=SYNC_CACHE_SECONDS)
+def clean_currency(series):
+
+    return (
+        series.astype(str)
+        .str.replace("rp", "", case=False)
+        .str.replace(".", "")
+        .str.replace(",", "")
+        .str.strip()
+        .pipe(pd.to_numeric, errors="coerce")
+        .fillna(0)
+    )
+
+
+@st.cache_data(ttl=CACHE_TTL)
 def load_master():
 
     df_products = load_sheet(SHEET_PRODUCTS)
-
     df_price = load_sheet(SHEET_PRICE)
 
-    df_products = df_products.rename(columns={
-        "Item SKU": "item_sku",
-        "SKU": "base_sku",
-        "Product Name": "product_name",
-        "Item Name": "item_name",
-        "Size Name": "size",
-        "Warna Name": "color",
-        "Vendor Name": "vendor",
-        "Stock": "stock"
-    })
+    # rename products
+    rename_products = {
 
-    df_price = df_price.rename(columns={
-        "SKU": "base_sku",
-        "HPP": "cost",
-        "Revenue": "price"
-    })
+        "item sku": "item_sku",
+        "sku": "base_sku",
+        "product name": "product_name",
+        "item name": "item_name",
+        "size name": "size",
+        "warna name": "color",
+        "vendor name": "vendor",
+        "stock": "stock"
 
-    df_price["cost"] = (
-        df_price["cost"]
-        .astype(str)
-        .str.replace("Rp", "")
-        .str.replace(".", "")
-        .str.replace(",", "")
-        .astype(float)
-    )
+    }
 
-    df_price["price"] = (
-        df_price["price"]
-        .astype(str)
-        .str.replace("Rp", "")
-        .str.replace(".", "")
-        .str.replace(",", "")
-        .astype(float)
-    )
+    df_products = df_products.rename(columns=rename_products)
+
+    if "stock" not in df_products.columns:
+        df_products["stock"] = 0
+
+    df_products["stock"] = pd.to_numeric(
+        df_products["stock"],
+        errors="coerce"
+    ).fillna(0)
+
+    # rename price
+    rename_price = {
+
+        "sku": "base_sku",
+        "hpp": "cost",
+        "revenue": "price"
+
+    }
+
+    df_price = df_price.rename(columns=rename_price)
+
+    if "cost" in df_price.columns:
+        df_price["cost"] = clean_currency(df_price["cost"])
+
+    else:
+        df_price["cost"] = 0
+
+    if "price" in df_price.columns:
+        df_price["price"] = clean_currency(df_price["price"])
+
+    else:
+        df_price["price"] = 0
 
     df = df_products.merge(
         df_price[["base_sku", "cost", "price"]],
@@ -222,7 +206,8 @@ def load_master():
         how="left"
     )
 
-    df["stock"] = df["stock"].fillna(0)
+    df["cost"] = df["cost"].fillna(0)
+    df["price"] = df["price"].fillna(0)
 
     return df
 
@@ -250,6 +235,7 @@ def auto_sync():
 
             conn.execute("""
             UPDATE products SET
+
             base_sku=?,
             product_name=?,
             item_name=?,
@@ -258,7 +244,9 @@ def auto_sync():
             vendor=?,
             cost=?,
             price=?
+
             WHERE item_sku=?
+
             """, (
 
                 row["base_sku"],
@@ -347,7 +335,7 @@ def remove_stock(sku, qty):
 
 
 # =====================================================
-# LOAD DATA
+# LOAD INVENTORY
 # =====================================================
 
 def get_inventory():
@@ -357,6 +345,7 @@ def get_inventory():
     df = pd.read_sql_query("""
 
     SELECT
+
     p.item_sku,
     p.product_name,
     p.size,
@@ -364,9 +353,15 @@ def get_inventory():
     p.vendor,
     p.cost,
     p.price,
+    (p.price - p.cost) AS profit,
     s.qty
+
     FROM products p
-    JOIN stock s ON p.item_sku=s.item_sku
+
+    JOIN stock s
+
+    ON p.item_sku=s.item_sku
+
     ORDER BY p.product_name
 
     """, conn)
@@ -381,7 +376,6 @@ def get_inventory():
 # =====================================================
 
 migrate_schema()
-
 auto_sync()
 
 
@@ -399,10 +393,12 @@ menu = st.sidebar.selectbox(
     "Menu",
 
     [
+
         "Dashboard",
         "Add Stock",
         "Remove Stock",
         "Movement History"
+
     ]
 
 )
@@ -412,7 +408,11 @@ if menu == "Dashboard":
 
     df = get_inventory()
 
-    st.metric("Total Units", int(df["qty"].sum()))
+    col1, col2, col3 = st.columns(3)
+
+    col1.metric("Total Units", int(df.qty.sum()))
+    col2.metric("Total Value", int((df.price * df.qty).sum()))
+    col3.metric("Total Profit Potential", int((df.profit * df.qty).sum()))
 
     st.dataframe(df, use_container_width=True)
 
@@ -421,14 +421,13 @@ elif menu == "Add Stock":
 
     df = get_inventory()
 
-    sku = st.selectbox("Item SKU", df["item_sku"])
+    sku = st.selectbox("Item SKU", df.item_sku)
 
     qty = st.number_input("Qty", min_value=1)
 
     if st.button("Add"):
 
         add_stock(sku, qty)
-
         st.rerun()
 
 
@@ -436,14 +435,13 @@ elif menu == "Remove Stock":
 
     df = get_inventory()
 
-    sku = st.selectbox("Item SKU", df["item_sku"])
+    sku = st.selectbox("Item SKU", df.item_sku)
 
     qty = st.number_input("Qty", min_value=1)
 
     if st.button("Remove"):
 
         remove_stock(sku, qty)
-
         st.rerun()
 
 
