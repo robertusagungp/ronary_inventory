@@ -584,6 +584,24 @@ if menu == "Dashboard":
         "base_sku", "product_name", "item_name", "size", "color", "vendor",
         "cost", "price", "qty", "profit", "item_sku", "stock_updated_at"
     ]
+
+    # =========================================================
+    # SUMMARY BERDASARKAN FILTER (FIX)
+    # =========================================================
+    
+    summary_df = view.copy()
+    
+    total_units = int(summary_df["qty"].sum()) if not summary_df.empty else 0
+    inventory_value = int((summary_df["price"] * summary_df["qty"]).sum()) if not summary_df.empty else 0
+    profit_potential = int(((summary_df["price"] - summary_df["cost"]) * summary_df["qty"]).sum()) if not summary_df.empty else 0
+    low_count = int((summary_df["qty"] <= low_thr).sum()) if not summary_df.empty else 0
+    
+    a, b, c, d = st.columns(4)
+    a.metric("Total Units", total_units)
+    b.metric("Inventory Value (Revenue x Qty)", inventory_value)
+    c.metric("Profit Potential ((Revenue-HPP) x Qty)", profit_potential)
+    d.metric(f"Low Stock (≤ {low_thr})", low_count)
+
     st.dataframe(view[show_cols], use_container_width=True)
 
 # Add stock
