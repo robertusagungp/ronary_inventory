@@ -536,12 +536,6 @@ token_uri = "https://oauth2.googleapis.com/token"
 if menu == "Dashboard":
     st.subheader("Dashboard")
 
-    low_thr = int(st.session_state["low_stock_threshold"])
-    total_units = int(df["qty"].sum()) if not df.empty else 0
-    inventory_value = int((df["price"] * df["qty"]).sum()) if not df.empty else 0
-    profit_potential = int(((df["price"] - df["cost"]) * df["qty"]).sum()) if not df.empty else 0
-    low_count = int((df["qty"] <= low_thr).sum()) if not df.empty else 0
-
     a, b, c, d = st.columns(4)
     a.metric("Total Units", total_units)
     b.metric("Inventory Value (Revenue x Qty)", inventory_value)
