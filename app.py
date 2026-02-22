@@ -50,23 +50,16 @@ def norm(s):
 
 
 def rp_to_number(x):
-
     x = str(x)
     x = x.replace("Rp", "")
     x = x.replace(".", "")
     x = x.replace(",", "")
     x = re.sub(r"[^\d]", "", x)
-
-    if x == "":
-        return 0
-
-    return float(x)
+    return float(x) if x else 0
 
 
 def sheet_csv_url():
-
     encoded_sheet = urllib.parse.quote(SHEET_NAME)
-
     return (
         f"https://docs.google.com/spreadsheets/d/{GOOGLE_SHEET_ID}/export"
         f"?format=csv&sheet={encoded_sheet}&_ts={int(dt.datetime.now().timestamp())}"
@@ -124,7 +117,7 @@ def migrate_schema():
 
 
 # =====================================================
-# INVENTORY CORE
+# CORE INVENTORY
 # =====================================================
 
 def db_get_inventory():
@@ -144,36 +137,36 @@ def db_get_inventory():
         p.cost,
         p.price,
         COALESCE(s.qty,0) qty,
-        (p.price - p.cost) profit,
-        s.updated_at
+        (p.price-p.cost) profit,
+        COALESCE(s.updated_at,"") updated_at
 
     FROM products p
-    LEFT JOIN stock s ON p.item_sku = s.item_sku
+    LEFT JOIN stock s ON p.item_sku=s.item_sku
 
     ORDER BY product_name,item_name,color,size
 
-    """, conn)
+    """,conn)
 
     conn.close()
 
     return df
 
 
-def db_adjust_stock(item_sku, delta, movement, reason):
+def db_adjust_stock(item_sku,delta,movement,reason):
 
-    conn = get_conn()
+    conn=get_conn()
 
-    cur = conn.execute(
+    cur=conn.execute(
         "SELECT qty FROM stock WHERE item_sku=?",
         (item_sku,)
     ).fetchone()
 
-    old = cur[0] if cur else 0
+    old=cur[0] if cur else 0
 
-    new = old + delta
+    new=old+delta
 
     conn.execute("""
-    INSERT OR REPLACE INTO stock(item_sku,qty,updated_at)
+    INSERT OR REPLACE INTO stock
     VALUES(?,?,?)
     """,(item_sku,new,now_iso()))
 
@@ -185,18 +178,18 @@ def db_adjust_stock(item_sku, delta, movement, reason):
     conn.commit()
     conn.close()
 
-    st.session_state.local_dirty_stock = True
+    st.session_state.local_dirty_stock=True
 
 
 def db_get_movements(limit=500):
 
     conn=get_conn()
 
-    df=pd.read_sql_query("""
-    SELECT * FROM movements
-    ORDER BY id DESC
-    LIMIT ?
-    """,conn,params=(limit,))
+    df=pd.read_sql_query(
+        "SELECT * FROM movements ORDER BY id DESC LIMIT ?",
+        conn,
+        params=(limit,)
+    )
 
     conn.close()
 
@@ -204,14 +197,12 @@ def db_get_movements(limit=500):
 
 
 # =====================================================
-# GOOGLE SHEET PULL
+# GOOGLE SHEET SYNC
 # =====================================================
 
 def sheet_pull_master():
 
-    url=sheet_csv_url()
-
-    r=requests.get(url)
+    r=requests.get(sheet_csv_url())
 
     df=pd.read_csv(StringIO(r.text))
 
@@ -242,18 +233,9 @@ def db_upsert_from_master(df):
         conn.execute("""
         INSERT OR REPLACE INTO products
         VALUES(?,?,?,?,?,?,?,?,?,?)
-        """,(
-            r.item_sku,
-            r.base_sku,
-            r.product_name,
-            r.item_name,
-            r.size,
-            r.color,
-            r.vendor,
-            r.cost,
-            r.price,
-            now_iso()
-        ))
+        """,(r.item_sku,r.base_sku,r.product_name,
+             r.item_name,r.size,r.color,r.vendor,
+             r.cost,r.price,now_iso()))
 
         conn.execute("""
         INSERT OR REPLACE INTO stock
@@ -263,10 +245,6 @@ def db_upsert_from_master(df):
     conn.commit()
     conn.close()
 
-
-# =====================================================
-# GOOGLE SHEET PUSH
-# =====================================================
 
 def gsheets_client():
 
@@ -300,19 +278,17 @@ def sheet_push_stock_from_db(df):
 
     for _,r in df.iterrows():
 
-        sku=r.item_sku
-
-        if sku in row_map:
+        if r.item_sku in row_map:
 
             cells.append(
-                gspread.Cell(row_map[sku],col_stock,int(r.qty))
+                gspread.Cell(row_map[r.item_sku],col_stock,int(r.qty))
             )
 
     ws.update_cells(cells)
 
 
 # =====================================================
-# SYNC
+# SYNC WRAPPERS
 # =====================================================
 
 def pull():
@@ -330,15 +306,33 @@ def push():
 
 
 # =====================================================
-# UI
+# UI START
 # =====================================================
 
 migrate_schema()
 
-st.title("Ronary Inventory System")
-
 if "local_dirty_stock" not in st.session_state:
     st.session_state.local_dirty_stock=False
+
+
+st.title("Ronary Inventory System")
+
+
+# =====================================================
+# PUSH PULL BUTTONS RESTORED
+# =====================================================
+
+c1,c2=st.columns(2)
+
+with c1:
+    if st.button("⬇️ Force PULL (Sheet → App)"):
+        pull()
+        st.success("PULL SUCCESS")
+
+with c2:
+    if st.button("⬆️ Force PUSH (App → Sheet)"):
+        push()
+        st.success("PUSH SUCCESS")
 
 
 # =====================================================
@@ -372,14 +366,12 @@ if menu=="Dashboard":
         ["(All)"]+sorted(df.vendor.unique())
     )
 
-    only_low=st.checkbox("Low only")
+    only_low=st.checkbox("Only low stock")
 
     view=df.copy()
 
     if q:
-        view=view[
-            view.product_name.str.contains(q,case=False)
-        ]
+        view=view[view.product_name.str.contains(q,case=False)]
 
     if vendor!="(All)":
         view=view[view.vendor==vendor]
@@ -387,93 +379,32 @@ if menu=="Dashboard":
     if only_low:
         view=view[view.qty<=low_thr]
 
-    # SUMMARY FIXED BASED ON FILTER
-
+    # SUMMARY FOLLOW FILTER
     total_units=view.qty.sum()
-
     inventory_value=(view.price*view.qty).sum()
-
     profit=(view.profit*view.qty).sum()
-
     low_count=(view.qty<=low_thr).sum()
 
-    c1,c2,c3,c4=st.columns(4)
+    a,b,c,d=st.columns(4)
 
-    c1.metric("Total Units",int(total_units))
-    c2.metric("Inventory Value",int(inventory_value))
-    c3.metric("Profit Potential",int(profit))
-    c4.metric("Low Stock",int(low_count))
+    a.metric("Total Units",int(total_units))
+    b.metric("Inventory Value",int(inventory_value))
+    c.metric("Profit Potential",int(profit))
+    d.metric("Low Stock",int(low_count))
 
     st.dataframe(view,use_container_width=True)
 
 
-    # =====================================================
     # PROCUREMENT ENGINE
-    # =====================================================
-
     st.subheader("Procurement Recommendation")
 
     analysis=view.copy()
 
-    analysis["priority"]=(
-        (analysis.qty<=low_thr)*100
-        +analysis.profit.rank(pct=True)*50
-        -analysis.qty.rank(pct=True)*50
-    )
+    analysis["priority"]=(analysis.qty<=low_thr)*100-analysis.qty
 
-    analysis=analysis.sort_values("priority",ascending=False)
+    critical=analysis.sort_values("priority",ascending=False)
 
-    critical=analysis[analysis.qty<=low_thr]
-
-    st.write("Critical Items")
-
-    st.dataframe(critical)
-
-
-    # RAXZEL SPECIAL
-
-    raxzel=analysis[analysis.vendor.str.lower()=="raxzel"]
-
-    if not raxzel.empty:
-
-        st.write("RAXZEL Batch Recommendation")
-
-        grouped=raxzel.groupby([
-            "product_name",
-            "item_name",
-            "color"
-        ]).qty.sum().reset_index()
-
-        rec=[]
-
-        for _,r in grouped.iterrows():
-
-            stock=r.qty
-
-            if "polo" in r.product_name.lower():
-
-                yield_batch=25
-                type="Polo"
-
-            else:
-
-                yield_batch=32
-                type="Tencel"
-
-            if stock<=low_thr*4:
-
-                batch=1
-
-                rec.append({
-                    "product":r.product_name,
-                    "color":r.color,
-                    "stock":stock,
-                    "batch":batch,
-                    "output":batch*yield_batch,
-                    "type":type
-                })
-
-        st.dataframe(pd.DataFrame(rec))
+    st.dataframe(critical.head(20))
 
 
 # =====================================================
@@ -487,9 +418,7 @@ elif menu=="Add Stock":
     qty=st.number_input("Qty",1)
 
     if st.button("Add"):
-
         db_adjust_stock(sku,qty,"IN","RESTOCK")
-
         st.success("Added")
 
 
@@ -504,9 +433,7 @@ elif menu=="Remove Stock":
     qty=st.number_input("Qty",1)
 
     if st.button("Remove"):
-
         db_adjust_stock(sku,-qty,"OUT","SOLD")
-
         st.success("Removed")
 
 
